@@ -2,18 +2,18 @@
 
 Handles the one non-obvious routing rule: Claude deployments on Azure answer
 only via the Responses API, everything else via chat/completions.
+
+DEFAULT/DEEP remain the registry defaults for hosted slots; prefer
+model_router.model_for(task_class) / complete_for(task_class, prompt) in
+application code instead of passing deployment names directly.
 """
 from __future__ import annotations
 
 import os
 import json
-import time
 import urllib.request
 import urllib.error
 
-# Retry/backoff primitives live in engineering.py (single source of truth).
-# Import TransientError from there so azure's raises are caught by
-# engineering.with_retry — they must be the SAME class, not two lookalikes.
 from engineering import with_retry, TransientError
 
 BASE = os.environ.get(
@@ -21,14 +21,12 @@ BASE = os.environ.get(
     'https://admin-3443-resourche.openai.azure.com/openai/v1')
 KEY = os.environ.get('AZURE_FOUNDRY_API_KEY', '')
 
+# Registry defaults (also registered in model_router.CAPABILITY_SLOTS)
 DEFAULT = 'gpt-5.6-sol'
 DEEP = 'claude-opus-5'
 EMBED = 'text-embedding-3-small'
 
-# Deployments that ONLY answer on /responses
 RESPONSES_ONLY = ('claude',)
-
-# Retryable HTTP status codes Azure throws under load (429 quota, 529 overload).
 BACKOFF_CODES = {429, 500, 502, 503, 504}
 
 
@@ -48,11 +46,9 @@ def _post(path: str, payload: dict, timeout: int = 180) -> dict:
         raise
 
 
-
 def complete(prompt: str, *, model: str = DEFAULT, max_tokens: int = 4000,
              system: str | None = None) -> str:
     """Single completion with retry/backoff. Routes Claude to /responses."""
-    from engineering import with_retry
 
     def _call():
         if any(m in model.lower() for m in RESPONSES_ONLY):
@@ -78,13 +74,25 @@ def embed(text: str | list[str], *, model: str = EMBED) -> list:
     return [x['embedding'] for x in d['data']]
 
 
-def llm(prompt: str, *, model: str | None = None) -> str:
-    """Callable matching the harness LLM signature."""
+def llm(prompt: str, *, model: str | None = None, task_class: str | None = None) -> str:
+    """General completion. Prefer task_class so model_router selects the slot."""
+    if model is None and task_class:
+        try:
+            from model_router import model_for
+            model = model_for(task_class)
+        except Exception:
+            model = DEFAULT
     return complete(prompt, model=model or DEFAULT)
 
 
-def deep(prompt: str, *, model: str | None = None) -> str:
-    """Deep-reasoning callable (Claude via Responses API)."""
+def deep(prompt: str, *, model: str | None = None, task_class: str = 'plan') -> str:
+    """Deep-reasoning completion; default task_class=plan → hosted_reasoning."""
+    if model is None:
+        try:
+            from model_router import model_for
+            model = model_for(task_class)
+        except Exception:
+            model = DEEP
     return complete(prompt, model=model or DEEP)
 
 
